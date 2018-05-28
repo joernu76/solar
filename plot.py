@@ -2,6 +2,8 @@ import codecs
 import datetime
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import AxesGrid
+import os
+import pickle
 import numpy as np
 import glob
 
@@ -10,6 +12,16 @@ JSEC_START = datetime.datetime(2000, 1, 1)
 
 MAX_POWER = 3.92  # ~= 16 * 1.65 * 0.992 * 0.1497
 RED_POWER = 0.7 * MAX_POWER
+
+BETA = -0.41  # %/C
+NOCT = 45  # +-2 C
+TR = 25
+
+
+def get_average_temp(doy):
+    # -5 - 25
+    return 10 - 15 * np.cos((doy - 30) / 365 * 2 * np.pi)
+
 
 def datetime_to_jsec(dt):
     """
@@ -164,6 +176,8 @@ def compute_power(dts):
         if ele > 0:
             azi_mod = 130
             ele_mod = 90 - 35
+            doy = day_of_year(dt)
+            t_a = get_average_temp(doy)
             # https://en.wikipedia.org/wiki/Great-circle_distance
             fac = cosd(ele) * cosd(ele_mod) * cosd(azi_mod - azi) + sind(ele) * sind(ele_mod)
             # solar radiation at top of atmosphere
@@ -173,9 +187,13 @@ def compute_power(dts):
             # attenuation -> https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
             AM = 1. / (sind(ele) + 0.50572 * (6.07995 + ele) ** -1.6364)
             I *= 0.7 ** AM ** 0.678
-            # + 10% for diffusion
+            # + 15% for diffusion
             fac = max(0.15, fac + 0.15)
-            power2.append(MAX_POWER * fac * I)
+            # Correction for cell efficiency due to temperature
+            # http://crossmark.crossref.org/dialog/?doi=10.1016/j.egypro.2014.10.282&domain=pdf
+            t_c = t_a + (NOCT - 20) * 1000 * I * fac / 800
+            fac2 = 1 + BETA * (t_c - 25) / 100
+            power2.append(MAX_POWER * fac * fac2 * I)
         else:
             power2.append(0)
 
@@ -197,28 +215,35 @@ def read_monthly(filename):
 
 
 def ana_daily():
-    hours = {}
-    powers = {}
-    maxs = {}
-    for i in range(12):
-        hours[i] = []
-        powers[i] = []
-        maxs[i] = None
-    for fn in sorted(glob.glob("My PV plant 1-201[34]????.csv")):
-        print(fn)
-        a, b, c = read_daily(fn)
+    cache_file = "daily.pickle"
+    if os.path.exists(cache_file):
+        with open(cache_file, "rb") as pifi:
+            hours, powers, maxs, max_time = pickle.load(pifi)
+    else:
+        hours = {}
+        powers = {}
+        maxs = {}
+        for i in range(12):
+            hours[i] = []
+            powers[i] = []
+            maxs[i] = None
+        for fn in sorted(glob.glob("My PV plant 1-201[34]????.csv")):
+            print(fn)
+            a, b, c = read_daily(fn)
 
-        month = a[0].month - 1
-        hours[month].extend(
-            [x.hour + x.minute / 60. + x.second / 60. / 60. for x in a])
-        powers[month].extend(b)
-        c = np.asarray(c)
-        if maxs[month] is None:
-            max_time = [
-                x.hour + x.minute / 60. + x.second / 60. / 60. for x in a]
-            maxs[month] = c
-        elif c.shape == maxs[month].shape:
-            maxs[month] = np.where(maxs[month] > c, maxs[month], c)
+            month = a[0].month - 1
+            hours[month].extend(
+                [x.hour + x.minute / 60. + x.second / 60. / 60. for x in a])
+            powers[month].extend(b)
+            c = np.asarray(c)
+            if maxs[month] is None:
+                max_time = [
+                    x.hour + x.minute / 60. + x.second / 60. / 60. for x in a]
+                maxs[month] = c
+            elif c.shape == maxs[month].shape:
+                maxs[month] = np.where(maxs[month] > c, maxs[month], c)
+        with open(cache_file, "wb") as pifi:
+            pickle.dump((hours, powers, maxs, max_time), pifi)
 
     fig = plt.figure()
     grid = AxesGrid(fig, 111,  # similar to subplot(142)
@@ -275,42 +300,51 @@ def compute_days(times):
 
 
 def ana_monthly():
-    time1 = []
-    power1 = []
-    power2 = []
-    power3 = []
-    time1m = []
-    power1m = []
-    timey = {}
-    timeym = {}
-    powery = {}
-    powerym = {}
-    powery2 = {}
-    powery3 = {}
-    for fn in sorted(glob.glob("My PV plant 1-201???.csv")):
-        print(fn)
-        time, power = read_monthly(fn)
-        time1.extend(time)
-        power1.extend(power)
-        time1m.append(time[len(time) // 2])
-        power1m.append(np.mean(power))
-        cds = compute_days(time)
-        power2.extend([cd[0] for cd in cds])
-        power3.extend([cd[1] for cd in cds])
+    cache_file = "monthly.pickle"
+    if os.path.exists(cache_file):
+        with open(cache_file, "rb") as pifi:
+            time1, power1, power2, power3, time1m, power1m, timey, timeym, powery, powerym, powery2, powery3 = pickle.load(pifi)
+    else:
+        time1 = []
+        power1 = []
+        power2 = []
+        power3 = []
+        time1m = []
+        power1m = []
+        timey = {}
+        timeym = {}
+        powery = {}
+        powerym = {}
+        powery2 = {}
+        powery3 = {}
+        for fn in sorted(glob.glob("My PV plant 1-201???.csv")):
+            print(fn)
+            time, power = read_monthly(fn)
+            time1.extend(time)
+            power1.extend(power)
+            time1m.append(time[len(time) // 2])
+            power1m.append(np.mean(power))
+            cds = compute_days(time)
+            power2.extend([cd[0] for cd in cds])
+            power3.extend([cd[1] for cd in cds])
 
-        if time[0].year not in timey:
-            timey[time[0].year] = []
-            timeym[time[0].year] = []
-            powery[time[0].year] = []
-            powerym[time[0].year] = []
-            powery2[time[0].year] = []
-            powery3[time[0].year] = []
-        timey[time[0].year].extend(day_of_year(x) for x in time)
-        powery[time[0].year].extend(power)
-        powery2[time[0].year].extend([cd[0] for cd in cds])
-        powery3[time[0].year].extend([cd[1] for cd in cds])
-        timeym[time[0].year].append(day_of_year(time[len(time) // 2]))
-        powerym[time[0].year].append(np.mean(power))
+            if time[0].year not in timey:
+                timey[time[0].year] = []
+                timeym[time[0].year] = []
+                powery[time[0].year] = []
+                powerym[time[0].year] = []
+                powery2[time[0].year] = []
+                powery3[time[0].year] = []
+            timey[time[0].year].extend(day_of_year(x) for x in time)
+            powery[time[0].year].extend(power)
+            powery2[time[0].year].extend([cd[0] for cd in cds])
+            powery3[time[0].year].extend([cd[1] for cd in cds])
+            timeym[time[0].year].append(day_of_year(time[len(time) // 2]))
+            powerym[time[0].year].append(np.mean(power))
+        with open(cache_file, "wb") as pifi:
+            pickle.dump(
+                (time1, power1, power2, power3, time1m, power1m, 
+                 timey, timeym, powery, powerym, powery2, powery3), pifi)
 
     plt.figure()
 
@@ -332,8 +366,9 @@ def ana_monthly():
     plt.legend()
 
 
-ana_daily()
-#ana_daily2()
-ana_monthly()
-plt.show()
+if __name__ == "__main__":
+    ana_daily()
+    # ana_daily2()
+    ana_monthly()
+    plt.show()
 
