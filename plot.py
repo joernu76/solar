@@ -279,9 +279,10 @@ def ana_daily():
         if len(powers[i]) > 0:
             im = grid[i].hexbin(
                 hours[i], powers[i], cmap=plt.cm.gray_r,
-                vmax=5, extent=(0, 24, MAX_POWER, 0))
+                vmax=5, extent=(0, 24, MAX_POWER, 0), rasterized=True)
             grid[i].plot(max_time, maxs[i], color="C1")
     grid.cbar_axes[0].colorbar(im, extend="max")
+    plt.savefig("daily.pdf")
 
 
 def compute_day(time):
@@ -353,6 +354,7 @@ def ana_monthly():
         "JFMAMJJASOND")
     plt.ylabel("kWh")
     plt.legend()
+    plt.savefig("monthly.pdf")
 
 
 if __name__ == "__main__":
