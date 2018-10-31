@@ -10,17 +10,30 @@ import glob
 
 JSEC_START = datetime.datetime(2000, 1, 1)
 
+# configuration of solar array
 MAX_POWER = 3.92  # ~= 16 * 1.65 * 0.992 * 0.1497
-RED_POWER = 0.7 * MAX_POWER
+AZIMUTH = 130
+ELEVATION = 90 - 35  # 90 is a panel lying flat on the ground
+LONGITUDE = 6.154
+LATITUDE = 50.747
 
+# loss of efficiency due to temperature
 BETA = -0.41  # %/C
 NOCT = 45  # +-2 C
-TR = 25
 
 
-def get_average_temp(doy):
+def get_average_temp(doy, hour):
+    """
+    very rough approximation of Aachen conditions.
+    A bit hand tuned :-)
+    """
     # -5 - 25
-    return 10 - 15 * np.cos((doy - 30) / 365 * 2 * np.pi)
+    # [1, 2, 6, 8, 12, 15, 17, 17, 14, 11, 6, 3]
+    # yearly variation
+    t_mean = 10 - 15 * np.cos((doy - 30) / 365 * 2 * np.pi)
+    # daily variation
+    t_mean += max(0, 10 - abs(hour - 12))
+    return t_mean
 
 
 def datetime_to_jsec(dt):
@@ -34,7 +47,7 @@ def datetime_to_jsec(dt):
     return total
 
 
-def computeHourOfDay(jsecs):
+def compute_hour_of_day(jsecs):
     date = JSEC_START + datetime.timedelta(seconds=jsecs)
     return date.hour + date.minute / 60. + date.second / 3600.
 
@@ -80,7 +93,7 @@ def compute_solar_angle(jsec, lon, lat):
     dec = np.arcsin(np.sin(oblqec) * np.sin(eclong))
     # Local coordinates
     # Greenwich mean sidereal time
-    gmst = 6.697375 + .0657098242 * time + computeHourOfDay(jsec)
+    gmst = 6.697375 + .0657098242 * time + compute_hour_of_day(jsec)
 
     gmst = gmst % 24.
     if (gmst < 0):
@@ -126,12 +139,24 @@ def compute_solar_angle(jsec, lon, lat):
 
 def convert_date(string):
     if len(string.split()) == 1:
-        day, month, year = [int(x) for x in string.split(".")]
+        sep = "."
+        if "/" in string:
+            sep = "/"
+        day, month, year = [int(x) for x in string.split(sep)]
+
         return datetime.datetime(year=year, month=month, day=day)
     else:
         date, time = string.split()
-        day, month, year = [int(x) for x in date.split(".")]
+        sep = "."
+        if "/" in date:
+            sep = "/"
+        day, month, year = [int(x) for x in date.split(sep)]
         hour, minute, second = [int(x) for x in time.split(":")]
+        hour -= 1
+        if month not in [11, 12, 1, 2, 3]:
+            hour -= 1
+        if hour <= 0:
+            hour = 0
         return datetime.datetime(year=year, month=month, day=day,
                                  hour=hour, minute=minute, second=second)
 
@@ -140,7 +165,7 @@ def read_csv(filename):
     try:
         with codecs.open(filename, "r", "utf-16") as fh:
             lines = fh.readlines()
-    except:
+    except BaseException:
         with open(filename, "r") as fh:
             lines = fh.readlines()
     data = [x.strip().replace("---", "0").split(";") for x in lines[3:] if not x.startswith(";")][1:]
@@ -161,25 +186,20 @@ def day_of_year(dt):
 
 
 def compute_power(dts):
-    power2 = []
+    """
+    Computes maximal power output under optimal conditions for given array of datetimes
+    """
+    power = []
     for dt in dts:
         jsec = datetime_to_jsec(dt)
-        # Fix for apparently wrong clock/timezone? in data
-        # Correction by 8 minutes on 2018-05-14
-        if dt.year >= 2014:
-            jsec -= 3600
-        azi, ele = compute_solar_angle(jsec, 6.154, 50.747)
+        azi, ele = compute_solar_angle(jsec, LONGITUDE, LATITUDE)
+
         if azi < 0:
             azi += 360
 
-        # refraction
         if ele > 0:
-            azi_mod = 130
-            ele_mod = 90 - 35
-            doy = day_of_year(dt)
-            t_a = get_average_temp(doy)
             # https://en.wikipedia.org/wiki/Great-circle_distance
-            fac = cosd(ele) * cosd(ele_mod) * cosd(azi_mod - azi) + sind(ele) * sind(ele_mod)
+            fac = cosd(ele) * cosd(ELEVATION) * cosd(AZIMUTH - azi) + sind(ele) * sind(ELEVATION)
             # solar radiation at top of atmosphere
             I = 1.353
             # correction for distance of sun from earth
@@ -191,21 +211,21 @@ def compute_power(dts):
             fac = max(0.15, fac + 0.15)
             # Correction for cell efficiency due to temperature
             # http://crossmark.crossref.org/dialog/?doi=10.1016/j.egypro.2014.10.282&domain=pdf
-            t_c = t_a + (NOCT - 20) * 1000 * I * fac / 800
+            t_a = get_average_temp(day_of_year(dt), dt.hour)
+            t_c = 0 + t_a + (NOCT - 20) * 1000 * I * fac / 800
             fac2 = 1 + BETA * (t_c - 25) / 100
-            power2.append(MAX_POWER * fac * fac2 * I)
+            power.append(MAX_POWER * fac * fac2 * I)
         else:
-            power2.append(0)
+            power.append(0)
 
-    return power2
+    return np.asarray(power)
 
 
 def read_daily(filename):
     data = read_csv(filename)
-    times, power = [[x[i] for x in data] for i in [0, 2]]
-    power2 = compute_power(times)
-    print(sum(power) / 12, sum(power2) / 12)
-    return times, power, power2
+    times, power = [np.asarray([x[i] for x in data]) for i in [0, 2]]
+    opt_power = compute_power(times)
+    return times, power, opt_power
 
 
 def read_monthly(filename):
@@ -227,21 +247,20 @@ def ana_daily():
             hours[i] = []
             powers[i] = []
             maxs[i] = None
-        for fn in sorted(glob.glob("My PV plant 1-201[34]????.csv")):
+        for fn in sorted(glob.glob("*/MyPlant-????????.csv")):
             print(fn)
-            a, b, c = read_daily(fn)
+            filetimes, filepowers, fileoptpowers = read_daily(fn)
 
-            month = a[0].month - 1
+            month = filetimes[0].month - 1
             hours[month].extend(
-                [x.hour + x.minute / 60. + x.second / 60. / 60. for x in a])
-            powers[month].extend(b)
-            c = np.asarray(c)
-            if maxs[month] is None:
+                [x.hour + x.minute / 60. + x.second / 60. / 60. for x in filetimes])
+            powers[month].extend(filepowers)
+            if maxs[month] is None or fileoptpowers.shape > maxs[month].shape:
                 max_time = [
-                    x.hour + x.minute / 60. + x.second / 60. / 60. for x in a]
-                maxs[month] = c
-            elif c.shape == maxs[month].shape:
-                maxs[month] = np.where(maxs[month] > c, maxs[month], c)
+                    x.hour + x.minute / 60. + x.second / 60. / 60. for x in filetimes]
+                maxs[month] = fileoptpowers
+            elif fileoptpowers.shape == maxs[month].shape:
+                maxs[month] = np.where(maxs[month] > fileoptpowers, maxs[month], fileoptpowers)
         with open(cache_file, "wb") as pifi:
             pickle.dump((hours, powers, maxs, max_time), pifi)
 
@@ -259,40 +278,16 @@ def ana_daily():
     for i in range(12):
         if len(powers[i]) > 0:
             im = grid[i].hexbin(
-                hours[i], powers[i], cmap=plt.cm.gray_r, vmax=5, extent=(0, 24, MAX_POWER, 0))
+                hours[i], powers[i], cmap=plt.cm.gray_r,
+                vmax=5, extent=(0, 24, MAX_POWER, 0))
             grid[i].plot(max_time, maxs[i], color="C1")
-            grid[i].plot(max_time, np.where(RED_POWER < maxs[i], RED_POWER, maxs[i]), color="C1")
     grid.cbar_axes[0].colorbar(im, extend="max")
 
 
-def ana_daily2():
-    hours = {}
-    powers = {}
-    maxs = {}
-    for i in range(12):
-        hours[i] = []
-        powers[i] = []
-        maxs[i] = None
-    plt.figure()
-    files = sorted(glob.glob("My PV plant 1-201312[23]?.csv") + glob.glob("My PV plant 1-2014010?.csv"))
-    n = round(np.sqrt(len(files)) / np.sqrt(1.61))
-    m = len(files) // n + 1
-    for idx, fn in enumerate(files):
-        print(fn)
-        a, b, c = read_daily(fn)
-
-        hour = [x.hour + x.minute / 60. + x.second / 60. / 60. for x in a]
-        plt.subplot(n, m, idx + 1)
-        plt.title(fn)
-        plt.plot(hour, b, "x")
-        plt.plot(hour, c)
-
-
 def compute_day(time):
-    power = compute_power(
+    opt_power = compute_power(
         [time + datetime.timedelta(minutes=x) for x in range(0, 24 * 60, 20)])
-    redux_power = [min(3.0, x) for x in power]
-    return np.sum(power) / 3., np.sum(redux_power) / 3.
+    return np.sum(opt_power) / 3.  # division by three for three values per hour
 
 
 def compute_days(times):
@@ -303,72 +298,64 @@ def ana_monthly():
     cache_file = "monthly.pickle"
     if os.path.exists(cache_file):
         with open(cache_file, "rb") as pifi:
-            time1, power1, power2, power3, time1m, power1m, timey, timeym, powery, powerym, powery2, powery3 = pickle.load(pifi)
+            times, powers, optpowers, times_mean, powers_mean, times_yearly, \
+                times_yearly_mean, powers_yearly, powers_yearly_mean = pickle.load(pifi)
     else:
-        time1 = []
-        power1 = []
-        power2 = []
-        power3 = []
-        time1m = []
-        power1m = []
-        timey = {}
-        timeym = {}
-        powery = {}
-        powerym = {}
-        powery2 = {}
-        powery3 = {}
-        for fn in sorted(glob.glob("My PV plant 1-201???.csv")):
+        times = []
+        powers = []
+        optpowers = []
+        times_mean = []
+        powers_mean = []
+        times_yearly = {}
+        times_yearly_mean = {}
+        powers_yearly = {}
+        powers_yearly_mean = {}
+        for fn in sorted(glob.glob("*/MyPlant-201???.csv")):
             print(fn)
             time, power = read_monthly(fn)
-            time1.extend(time)
-            power1.extend(power)
-            time1m.append(time[len(time) // 2])
-            power1m.append(np.mean(power))
-            cds = compute_days(time)
-            power2.extend([cd[0] for cd in cds])
-            power3.extend([cd[1] for cd in cds])
+            times.extend(time)
+            powers.extend(power)
+            optpowers.extend(compute_days(time))
+            times_mean.append(time[len(time) // 2])
+            powers_mean.append(np.mean(power))
 
-            if time[0].year not in timey:
-                timey[time[0].year] = []
-                timeym[time[0].year] = []
-                powery[time[0].year] = []
-                powerym[time[0].year] = []
-                powery2[time[0].year] = []
-                powery3[time[0].year] = []
-            timey[time[0].year].extend(day_of_year(x) for x in time)
-            powery[time[0].year].extend(power)
-            powery2[time[0].year].extend([cd[0] for cd in cds])
-            powery3[time[0].year].extend([cd[1] for cd in cds])
-            timeym[time[0].year].append(day_of_year(time[len(time) // 2]))
-            powerym[time[0].year].append(np.mean(power))
+            if time[0].year not in times_yearly:
+                times_yearly[time[0].year] = []
+                times_yearly_mean[time[0].year] = []
+                powers_yearly[time[0].year] = []
+                powers_yearly_mean[time[0].year] = []
+            times_yearly[time[0].year].extend(day_of_year(x) for x in time)
+            powers_yearly[time[0].year].extend(power)
+            times_yearly_mean[time[0].year].append(day_of_year(time[len(time) // 2]))
+            powers_yearly_mean[time[0].year].append(np.mean(power))
         with open(cache_file, "wb") as pifi:
             pickle.dump(
-                (time1, power1, power2, power3, time1m, power1m, 
-                 timey, timeym, powery, powerym, powery2, powery3), pifi)
+                (times, powers, optpowers, times_mean, powers_mean,
+                 times_yearly, times_yearly_mean, powers_yearly, powers_yearly_mean), pifi)
 
     plt.figure()
-
     plt.subplot(2, 1, 1)
-    plt.plot(time1, power1, "x")
-    plt.plot(time1, power2, "k-")
-    plt.plot(time1, power3, "k-")
-    plt.plot(time1m, power1m, lw=4)
-
+    plt.plot(times, powers, "x", label="daily")
+    plt.plot(times, optpowers, "k-", label="opt")
+    plt.plot(times_mean, powers_mean, lw=4, label="mean")
+    plt.legend()
+    plt.ylabel("kWh")
+    plt.ylim(0, 30)
     plt.subplot(2, 1, 2)
-    plt.plot(timey[2014], powery2[2014], "k-")
-    plt.plot(timey[2014], powery3[2014], "k-")
-    for idx, year in enumerate(timey):
-        plt.plot(timey[year], powery[year], "x",
+    for idx, year in enumerate(times_yearly):
+        plt.plot(times_yearly[year], powers_yearly[year], "x",
                  color="C{}".format(idx), label='_nolegend_')
-        plt.plot(timeym[year], powerym[year],
+        plt.plot(times_yearly_mean[year], powers_yearly_mean[year],
                  color="C{}".format(idx), label=year, lw=4)
     plt.xlim(0, 365)
+    plt.xticks(
+        np.arange(15, 365, 365 / 12),
+        "JFMAMJJASOND")
+    plt.ylabel("kWh")
     plt.legend()
 
 
 if __name__ == "__main__":
     ana_daily()
-    # ana_daily2()
     ana_monthly()
     plt.show()
-
