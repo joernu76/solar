@@ -218,18 +218,20 @@ def second_of_day(x):
     return x.hour + x.minute / 60 + x.second / (60 * 60)
 
 
-def compute_power(dts):
+def compute_power(dts, stray=False):
     """
     Computes maximal power output under optimal conditions for given
     array of datetimes
     """
     power = []
+    straypower = []
     for dt in dts:
         jsec = datetime_to_jsec(dt)
         azi, ele = compute_solar_angle(jsec, LONGITUDE, LATITUDE)
 
         if ele <= 0:
             power.append(0)
+            straypower.append(0)
             continue
 
         if azi < 0:
@@ -267,7 +269,10 @@ def compute_power(dts):
         # to problems in summer (dust??)
         fac2 = 1 + (1.3 * BETA) * (t_c - 25) / 100
         power.append(MAX_POWER * fac * fac2 * I)
+        straypower.append(MAX_POWER * 0.15 * fac2 * I)
 
+    if stray:
+        return np.asarray(power), np.asarray(straypower)
     return np.asarray(power)
 
 
@@ -278,8 +283,8 @@ def read_daily(filename):
         times, power = times[12:], power[12:]
     if times[0] == times[12]:
         times, power = times[12:], power[12:]
-    opt_power = compute_power(times)
-    return times, power, opt_power
+    opt_power, stray_power = compute_power(times, stray=True)
+    return times, power, opt_power, stray_power
 
 
 def read_monthly(filename):
@@ -303,12 +308,14 @@ def ana_daily():
     cache_file = "daily.pickle"
     if os.path.exists(cache_file):
         with open(cache_file, "rb") as pifi:
-            hours, powers, maxs, mins, max_time = pickle.load(pifi)
+            hours, powers, maxs, mins, straymean, max_time = pickle.load(pifi)
     else:
         hours = {}
         powers = {}
         maxs = {}
         mins = {}
+        straymean = {}
+        straymean_cnt = {}
         max_time = {}
         for i in range(12):
             hours[i] = []
@@ -318,7 +325,8 @@ def ana_daily():
         for fn in sorted(glob.glob("*/MyPlant-20??????.csv")):
             if fn in ["2019/MyPlant-20190331.csv"]:
                 continue
-            filetimes, filepowers, fileoptpowers = read_daily(fn)
+            filetimes, filepowers, fileoptpowers, filestraypowers = read_daily(fn)
+            assert fileoptpowers.shape == filestraypowers.shape
             print(f"{fn} {filepowers.sum():4.0f} {fileoptpowers.sum():4.0f}")
             month = filetimes[0].month - 1
             hours[month].extend([second_of_day(_x) for _x in filetimes])
@@ -326,6 +334,8 @@ def ana_daily():
             if maxs[month] is None:
                 maxs[month] = fileoptpowers
                 mins[month] = fileoptpowers
+                straymean[month] = filestraypowers
+                straymean_cnt[month] = 1
                 continue
 
             assert fileoptpowers.shape == maxs[month].shape, \
@@ -337,17 +347,23 @@ def ana_daily():
                 maxs[month] > fileoptpowers, maxs[month], fileoptpowers)
             mins[month] = np.where(
                 mins[month] < fileoptpowers, mins[month], fileoptpowers)
+            straymean[month] += filestraypowers
+            straymean_cnt[month] += 1
+
+        for month in straymean:
+            straymean[month] /= straymean_cnt[month]
 
         with open(cache_file, "wb") as pifi:
-            pickle.dump((hours, powers, maxs, mins, max_time), pifi)
+            pickle.dump((hours, powers, maxs, mins, straymean, max_time), pifi)
 
     for i, month in enumerate(months):
         if len(powers[i]) > 0:
             im = grid[i].hexbin(
                 hours[i], powers[i], cmap=plt.cm.gray_r,
                 vmax=5, extent=(0, 24, MAX_POWER, 0), rasterized=True)
-            grid[i].plot(max_time[i][:len(maxs[i])], maxs[i], color="r", zorder=100)
-            grid[i].plot(max_time[i][:len(mins[i])], mins[i], color="r", zorder=100)
+            grid[i].plot(max_time[i][:len(maxs[i])], maxs[i], color="C1", zorder=100)
+            grid[i].plot(max_time[i][:len(mins[i])], mins[i], color="C1", zorder=100)
+            grid[i].plot(max_time[i][:len(straymean[i])], straymean[i], color="C0", zorder=100)
         grid[i].set_xticks(np.arange(0, 25, 3))
         grid[i].set_xlim(3, 21)
         grid[i].set_ylim(0, 4)
@@ -408,8 +424,8 @@ def ana_monthly():
 
     fig, (ax1, ax2) = plt.subplots(2, 1)
     ax1.plot(times, powers, "x", label="daily")
-    ax1.plot(times, optpowers, "k-", label="opt")
-    ax1.plot(times_mean, powers_mean, lw=4, label="mean")
+    ax1.plot(times, optpowers, "k-", label="optimum")
+    ax1.plot(times_mean, powers_mean, lw=4, label="monthly mean")
     avg_power = {}
     for x, y in zip(times_mean, powers_mean):
         avg_power.setdefault(x.month, []).append(y)
@@ -425,23 +441,9 @@ def ana_monthly():
         ax2.plot(times_yearly[year], powers_yearly[year], "x",
                  color="C{}".format(idx), label='_nolegend_')
 
-        if len(times_yearly_mean[year]) < 5:
-            ax2.plot(times_yearly_mean[year], powers_yearly_mean[year],
-                     color="C{}".format(idx), label=year, lw=4)
-            continue
-        tck = interpolate.splrep(
-            times_yearly_mean[year], powers_yearly_mean[year], s=1)
-        newgrid = np.linspace(
-            times_yearly_mean[year][0], times_yearly_mean[year][-1])
-        #ax2.plot(newgrid, interpolate.splev(newgrid, tck),
-        #         color="C{}".format(idx), label=year, lw=4, zorder=100)
-        tck = interpolate.splrep(
-            times_yearly[year], powers_yearly[year],
-            w=np.full_like(times_yearly[year], 1/np.std(powers_yearly[year])))
-        print(tck)
-        ax2.plot(times_yearly[year], interpolate.splev(times_yearly[year], tck),
-                 color="C{}".format(idx), label=year, lw=4, zorder=100)
-        print(interpolate.splev(times_yearly[year], tck))
+        ax2.plot(times_yearly_mean[year], powers_yearly_mean[year],
+                 color="C{}".format(idx), label=year, lw=4)
+        continue
     ax2.set_xlim(0, 365)
     ax2.set_xticks(np.arange(15, 365, 365 // 12))
     ax2.set_xticklabels("JFMAMJJASOND")
@@ -451,6 +453,6 @@ def ana_monthly():
 
 
 if __name__ == "__main__":
-    # ana_daily()
-    ana_monthly()
+    ana_daily()
+    #ana_monthly()
     plt.show()
