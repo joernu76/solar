@@ -1,12 +1,14 @@
-import codecs
-from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import AxesGrid
 import os
 import pickle
-import numpy as np
 import glob
 import pytz
+import codecs
+from datetime import datetime, timedelta
+
+import matplotlib.pyplot as plt
+from scipy import interpolate
+from mpl_toolkits.axes_grid1 import AxesGrid
+import numpy as np
 
 
 # configuration of solar array
@@ -417,12 +419,29 @@ def ana_monthly():
     ax1.plot(times_mean, powers_avg, lw=4, label="multi-year mean")
     ax1.legend()
     ax1.set_ylabel("kWh")
-    ax1.set_ylim(0, 30)
+    ax1.set_ylim(0, 31)
+    ax1.set_xlim(times[0] - timedelta(days=15), times[-1] + timedelta(days=15))
     for idx, year in enumerate(times_yearly):
         ax2.plot(times_yearly[year], powers_yearly[year], "x",
                  color="C{}".format(idx), label='_nolegend_')
-        ax2.plot(times_yearly_mean[year], powers_yearly_mean[year],
-                 color="C{}".format(idx), label=year, lw=4)
+
+        if len(times_yearly_mean[year]) < 5:
+            ax2.plot(times_yearly_mean[year], powers_yearly_mean[year],
+                     color="C{}".format(idx), label=year, lw=4)
+            continue
+        tck = interpolate.splrep(
+            times_yearly_mean[year], powers_yearly_mean[year], s=1)
+        newgrid = np.linspace(
+            times_yearly_mean[year][0], times_yearly_mean[year][-1])
+        #ax2.plot(newgrid, interpolate.splev(newgrid, tck),
+        #         color="C{}".format(idx), label=year, lw=4, zorder=100)
+        tck = interpolate.splrep(
+            times_yearly[year], powers_yearly[year],
+            w=np.full_like(times_yearly[year], 1/np.std(powers_yearly[year])))
+        print(tck)
+        ax2.plot(times_yearly[year], interpolate.splev(times_yearly[year], tck),
+                 color="C{}".format(idx), label=year, lw=4, zorder=100)
+        print(interpolate.splev(times_yearly[year], tck))
     ax2.set_xlim(0, 365)
     ax2.set_xticks(np.arange(15, 365, 365 // 12))
     ax2.set_xticklabels("JFMAMJJASOND")
@@ -432,6 +451,6 @@ def ana_monthly():
 
 
 if __name__ == "__main__":
-    ana_daily()
+    # ana_daily()
     ana_monthly()
     plt.show()
