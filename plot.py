@@ -13,8 +13,8 @@ import numpy as np
 
 # configuration of solar array
 MAX_POWER = 3.92  # ~= 16 * 1.65 * 0.992 * 0.1497
-AZIMUTH = 130  # 0 north, 90 east, ...
-ELEVATION = 90 - 35  # 90 is a panel lying flat on the ground
+AZIMUTH = 135  # 0 north, 90 east, ...
+ELEVATION = 90 - 35  # 35  # 90 is a panel lying flat on the ground
 LONGITUDE = 6.154
 LATITUDE = 50.747
 ALTITUDE = 0.26
@@ -27,6 +27,9 @@ UTC = pytz.utc
 CET = pytz.timezone("Europe/Berlin")
 JSEC_START = UTC.localize(datetime(2000, 1, 1))
 
+YEARLY_TEMP_MEAN = 10.
+YEARLY_TEMP_VAR = 10.
+DAILY_TEMP_VAR = 5.
 
 months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -35,14 +38,14 @@ months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
 def get_average_temp(doy, hour):
     """
     very rough approximation of Aachen conditions.
-    A bit hand tuned :-)
+    Very hand tuned :-)
     """
     # -5 - 25
     # [1, 2, 6, 8, 12, 15, 17, 17, 14, 11, 6, 3]
     # yearly variation
-    t_mean = 10 - 10 * np.cos((doy - 30) / 365 * 2 * np.pi)
+    t_mean = YEARLY_TEMP_MEAN - YEARLY_TEMP_VAR * np.cos(2 * np.pi * (doy - 15) / 365)
     # daily variation
-    t_mean += 10 * np.cos(2 * np.pi * (hour - 16) / 24)
+    t_mean += DAILY_TEMP_VAR * np.cos(2 * np.pi * (hour - 16) / 24)
     return t_mean
 
 
@@ -218,62 +221,82 @@ def second_of_day(x):
     return x.hour + x.minute / 60 + x.second / (60 * 60)
 
 
-def compute_power(dts, stray=False):
+def compute_powers(dts, stray=False):
+    return np.asarray([compute_power(dt, stray) for dt in dts]).T
+
+
+def compute_power(dt, stray=False):
     """
     Computes maximal power output under optimal conditions for given
     array of datetimes
     """
-    power = []
-    straypower = []
-    for dt in dts:
-        jsec = datetime_to_jsec(dt)
-        azi, ele = compute_solar_angle(jsec, LONGITUDE, LATITUDE)
+    jsec = datetime_to_jsec(dt)
+    azi, ele = compute_solar_angle(jsec, LONGITUDE, LATITUDE)
 
-        if ele <= 0:
-            power.append(0)
-            straypower.append(0)
-            continue
+    # This does not take into account hills mountains,
+    # partially visible disk, refraction, etc.
+    # I.e. bad close to horizon, but power is small anyway
+    if ele <= 0:
+        if stray:
+            return 0, 0
+        return 0
 
-        if azi < 0:
-            azi += 360
+    if azi < 0:
+        azi += 360
 
-        # https://en.wikipedia.org/wiki/Great-circle_distance
-        # i.e. this is the cosine of angle between normal vector and sun
-        fac = (cosd(ele) * cosd(ELEVATION) * cosd(AZIMUTH - azi) +
-               sind(ele) * sind(ELEVATION))
-        # reflection correction, causes loss of a couple of percent at dusk
-        # https://www.osti.gov/servlets/purl/1350025
-        AOI = np.arccos(fac)
-        n_glass = 1.526
-        r_0 = 0.0434  # air/glass
-        AOI_r = np.arcsin(np.sin(AOI) / n_glass)
-        r_AOI = 0.5 * ((np.sin(AOI_r - AOI) ** 2 / np.sin(AOI_r + AOI) ** 2)
-                       + (np.tan(AOI_r - AOI) ** 2 / np.tan(AOI_r + AOI) ** 2))
-        corr_reflection = max(0, (1 - r_AOI) / (1 - r_0))
+    # https://en.wikipedia.org/wiki/Great-circle_distance
+    # i.e. this is the cosine of angle between normal vector and sun
+    # print(dt, azi, ele, AZIMUTH, ELEVATION)
+    incident_angle_fac = (
+        cosd(ele) * cosd(ELEVATION) * cosd(AZIMUTH - azi) +
+        sind(ele) * sind(ELEVATION))
 
-        # solar radiation at top of atmosphere
-        # https://en.wikipedia.org/wiki/Solar_irradiance
-        I = 1.360  # kW/m^2
-        # correction for distance of sun from earth
-        I *= 1 + 0.033 * np.cos(2 * np.pi * (day_of_year(dt) / 365))
-        # attenuation -> https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
-        AM = 1. / (sind(ele) + 0.50572 * (6.07995 + ele) ** -1.6364)
-        I *= (1 - ALTITUDE / 7.1) * (0.7 ** (AM ** 0.678)) + (ALTITUDE / 7.1)
-        # + 15% for diffusion (10% according to wikipedia..?)
-        fac = max(0.15, fac * corr_reflection + 0.15)
-        # Correction for cell efficiency due to temperature
-        # http://crossmark.crossref.org/dialog/?doi=10.1016/j.egypro.2014.10.282&domain=pdf
-        t_a = get_average_temp(day_of_year(dt), dt.hour + dt.minute / 60)
-        t_c = t_a + (NOCT - 20) * (1000 * I) * fac / 800
-        # adhoc (1.3) change of efficiency reduction due
-        # to problems in summer (dust??)
-        fac2 = 1 + (1.3 * BETA) * (t_c - 25) / 100
-        power.append(MAX_POWER * fac * fac2 * I)
-        straypower.append(MAX_POWER * 0.15 * fac2 * I)
+    # reflection correction, causes loss of a couple of percent at dusk
+    # https://www.osti.gov/servlets/purl/1350025
+    # I.e. actually fully negligible
+    AOI = np.arccos(incident_angle_fac)
+    n_glass = 1.526
+    r_0 = 0.0434  # air/glass
+    AOI_r = np.arcsin(np.sin(AOI) / n_glass)
+    r_AOI = 0.5 * ((np.sin(AOI_r - AOI) ** 2 / np.sin(AOI_r + AOI) ** 2)
+                   + (np.tan(AOI_r - AOI) ** 2 / np.tan(AOI_r + AOI) ** 2))
+    corr_reflection = max(0, (1 - r_AOI) / (1 - r_0))
+
+    # solar radiation at top of atmosphere
+    # https://en.wikipedia.org/wiki/Solar_irradiance
+    I = 1.360  # kW/m^2
+
+    # correction for distance of sun from earth
+    I *= 1 + 0.033 * np.cos(2 * np.pi * (day_of_year(dt) / 365))
+
+    # attenuation -> https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
+    AM = 1. / (sind(ele) + 0.50572 * (6.07995 + ele) ** -1.6364)
+    I *= (1 - ALTITUDE / 7.1) * (0.7 ** (AM ** 0.678)) + (ALTITUDE / 7.1)
+
+    incident_angle_fac = incident_angle_fac * corr_reflection
+
+    # Correction for cell efficiency due to temperature
+    # http://crossmark.crossref.org/dialog/?doi=10.1016/j.egypro.2014.10.282&domain=pdf
+    #
+    # This doesn't really work (see very strange temperatures in Aachen functions)
+    # Maybe the NOCT formula is off for my roof??
+    t_a = get_average_temp(day_of_year(dt), dt.hour + dt.minute / 60)
+    t_c = t_a + (NOCT - 20) * (1000 * I) * incident_angle_fac / 800
+    temperature_fac = 1 + (1.0 * BETA) * (t_c - 25) / 100
+
+    # derating due to overheating of inverter is missing!
+    # affects noon in July/August, mostly
+    # https://www.photovoltaik4all.de/media/pdf/34/12/c6/SMA-Wirkungungrade-Derat-TI-de-44.pdf
+    fullpower = MAX_POWER * temperature_fac * I
+
+    # 10% for diffusion (according to wikipedia..? do not find the link anymore)
+    diffusion = 0.1  # 10 %
+    power = fullpower * (diffusion + (1 - diffusion) * incident_angle_fac)
 
     if stray:
-        return np.asarray(power), np.asarray(straypower)
-    return np.asarray(power)
+        straypower = fullpower * diffusion
+        return power, straypower
+    return power
 
 
 def read_daily(filename):
@@ -283,7 +306,7 @@ def read_daily(filename):
         times, power = times[12:], power[12:]
     if times[0] == times[12]:
         times, power = times[12:], power[12:]
-    opt_power, stray_power = compute_power(times, stray=True)
+    opt_power, stray_power = compute_powers(times, stray=True)
     return times, power, opt_power, stray_power
 
 
@@ -360,7 +383,7 @@ def ana_daily():
         if len(powers[i]) > 0:
             im = grid[i].hexbin(
                 hours[i], powers[i], cmap=plt.cm.gray_r,
-                vmax=5, extent=(0, 24, MAX_POWER, 0), rasterized=True)
+                vmax=8, extent=(0, 24, MAX_POWER, 0), rasterized=True)
             grid[i].plot(max_time[i][:len(maxs[i])], maxs[i], color="C1", zorder=100)
             grid[i].plot(max_time[i][:len(mins[i])], mins[i], color="C1", zorder=100)
             grid[i].plot(max_time[i][:len(straymean[i])], straymean[i], color="C0", zorder=100)
@@ -374,7 +397,7 @@ def ana_daily():
 
 def compute_day(time):
     minutes = 20
-    opt_power = compute_power(
+    opt_power = compute_powers(
         [time + timedelta(minutes=x) for x in range(0, 24 * 60, minutes)])
     return np.sum(opt_power) / (60 / minutes)
 
@@ -454,5 +477,15 @@ def ana_monthly():
 
 if __name__ == "__main__":
     ana_daily()
-    #ana_monthly()
-    plt.show()
+    ana_monthly()
+    # now = datetime.now().replace(minute=0).replace(second=0).replace(hour=0).replace(microsecond=0)
+    # now = UTC.localize(now)
+    # dts = [now + timedelta(minutes=x) for x in range(0, 60 * 24, 5)]
+    # power = compute_powers(dts, stray=True)
+    # plt.figure()
+    # plt.ylabel("kWh")
+    # plt.xlabel("time")
+    # plt.plot(dts, power[0], label="power")
+    # plt.plot(dts, power[1], label="power (straylight only)")
+    # plt.legend()
+    #plt.show()
