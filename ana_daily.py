@@ -1,13 +1,24 @@
 import os
 import pickle
 import glob
-from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import AxesGrid
 import numpy as np
 
-from solar import *
+import solar
+
+
+def read_daily(filename):
+    data = solar.read_csv(filename)
+    times, power = [np.asarray([x[i] for x in data]) for i in [0, 2]]
+    if times[0] == times[12]:
+        times, power = times[12:], power[12:]
+    if times[0] == times[12]:
+        times, power = times[12:], power[12:]
+    opt_power, stray_power = solar.compute_powers(times, stray=True)
+    return times, power, opt_power, stray_power
+
 
 if __name__ == "__main__":
     fig = plt.figure()
@@ -45,7 +56,7 @@ if __name__ == "__main__":
             assert fileoptpowers.shape == filestraypowers.shape
             print(f"{fn} {filepowers.sum():4.0f} {fileoptpowers.sum():4.0f}")
             month = filetimes[0].month - 1
-            hours[month].extend([second_of_day(_x) for _x in filetimes])
+            hours[month].extend([solar.second_of_day(_x) for _x in filetimes])
             powers[month].extend(filepowers)
             if maxs[month] is None:
                 maxs[month] = fileoptpowers
@@ -57,8 +68,8 @@ if __name__ == "__main__":
             assert fileoptpowers.shape == maxs[month].shape, \
                    (fileoptpowers.shape, maxs[month].shape)
             assert (np.asarray(max_time[month][:len(fileoptpowers)]) -
-                    np.asarray([second_of_day(x) for x in filetimes])).sum() < 1e-4, \
-                   (np.asarray(max_time[month][:len(fileoptpowers)]) - np.asarray([second_of_day(x) for x in filetimes]))
+                    np.asarray([solar.second_of_day(x) for x in filetimes])).sum() < 1e-4, \
+                   (np.asarray(max_time[month][:len(fileoptpowers)]) - np.asarray([solar.second_of_day(x) for x in filetimes]))
             maxs[month] = np.where(
                 maxs[month] > fileoptpowers, maxs[month], fileoptpowers)
             mins[month] = np.where(
@@ -72,11 +83,11 @@ if __name__ == "__main__":
         with open(cache_file, "wb") as pifi:
             pickle.dump((hours, powers, maxs, mins, straymean, max_time), pifi)
 
-    for i, month in enumerate(months):
+    for i, month in enumerate(solar.months):
         if len(powers[i]) > 0:
             im = grid[i].hexbin(
                 hours[i], powers[i], cmap=plt.cm.gray_r,
-                vmax=8, extent=(0, 24, MAX_POWER, 0), rasterized=True)
+                vmax=8, extent=(0, 24, solar.MAX_POWER, 0), rasterized=True)
             grid[i].plot(max_time[i][:len(maxs[i])], maxs[i], color="C1", zorder=100)
             grid[i].plot(max_time[i][:len(mins[i])], mins[i], color="C1", zorder=100)
             grid[i].plot(max_time[i][:len(straymean[i])], straymean[i], color="C0", zorder=100)

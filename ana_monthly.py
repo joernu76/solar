@@ -1,14 +1,18 @@
 import os
 import pickle
 import glob
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import matplotlib.pyplot as plt
-from scipy import interpolate
-from mpl_toolkits.axes_grid1 import AxesGrid
 import numpy as np
 
-from solar import *
+import solar
+
+
+def read_monthly(filename):
+    data = solar.read_csv(filename)
+    times, power = [[x[i] for x in data] for i in [0, 2]]
+    return times, power
 
 
 if __name__ == "__main__":
@@ -32,7 +36,7 @@ if __name__ == "__main__":
             time, power = read_monthly(fn)
             times.extend(time)
             powers.extend(power)
-            optpowers.extend(compute_days(time))
+            optpowers.extend(solar.compute_days(time))
             times_mean.append(time[len(time) // 2])
             powers_mean.append(np.mean(power))
 
@@ -41,9 +45,9 @@ if __name__ == "__main__":
                 times_yearly_mean[time[0].year] = []
                 powers_yearly[time[0].year] = []
                 powers_yearly_mean[time[0].year] = []
-            times_yearly[time[0].year].extend(day_of_year(x) for x in time)
+            times_yearly[time[0].year].extend(solar.day_of_year(x) for x in time)
             powers_yearly[time[0].year].extend(power)
-            times_yearly_mean[time[0].year].append(day_of_year(time[len(time) // 2]))
+            times_yearly_mean[time[0].year].append(solar.day_of_year(time[len(time) // 2]))
             powers_yearly_mean[time[0].year].append(np.mean(power))
         with open(cache_file, "wb") as pifi:
             pickle.dump(

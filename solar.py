@@ -44,7 +44,8 @@ def get_average_temp(doy, hour):
     # -5 - 25
     # [1, 2, 6, 8, 12, 15, 17, 17, 14, 11, 6, 3]
     # yearly variation
-    t_mean = YEARLY_TEMP_MEAN - YEARLY_TEMP_VAR * np.cos(2 * np.pi * (doy - 15) / 365)
+    t_mean = YEARLY_TEMP_MEAN - \
+        YEARLY_TEMP_VAR * np.cos(2 * np.pi * (doy - 15) / 365)
     # daily variation
     t_mean += DAILY_TEMP_VAR * np.cos(2 * np.pi * (hour - 16) / 24)
     return t_mean
@@ -195,7 +196,9 @@ def read_csv(filename):
             lines = fh.readlines()
     data = [x.strip().replace("---", "0").split(";")
             for x in lines[3:] if not x.startswith(";")][1:]
-    data = [(convert_date(x), float(y.replace(",", ".")), float(z.replace(",", "."))) for x, y, z in data]
+    data = [
+        (convert_date(x), float(y.replace(",", ".")), float(z.replace(",", ".")))
+        for x, y, z in data]
     data = [(x, y, z) for x, y, z in data if x is not None]
     start_dt = data[0][0].replace(hour=0, minute=0, second=0, microsecond=0)
     while data[0][0] > start_dt:
@@ -220,10 +223,6 @@ def day_of_year(dt):
 
 def second_of_day(x):
     return x.hour + x.minute / 60 + x.second / (60 * 60)
-
-
-def compute_powers(dts, stray=False):
-    return np.asarray([compute_power(dt, stray) for dt in dts]).T
 
 
 def compute_power(dt, stray=False):
@@ -265,32 +264,32 @@ def compute_power(dt, stray=False):
 
     # solar radiation at top of atmosphere
     # https://en.wikipedia.org/wiki/Solar_irradiance
-    I = 1.360  # kW/m^2
+    intensity = 1.360  # kW/m^2
 
     # correction for distance of sun from earth
-    I *= 1 + 0.033 * np.cos(2 * np.pi * (day_of_year(dt) / 365))
+    intensity *= 1 + 0.033 * np.cos(2 * np.pi * (day_of_year(dt) / 365))
 
     # attenuation -> https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
-    AM = 1. / (sind(ele) + 0.50572 * (6.07995 + ele) ** -1.6364)
-    I *= (1 - ALTITUDE / 7.1) * (0.7 ** (AM ** 0.678)) + (ALTITUDE / 7.1)
+    airmass = 1. / (sind(ele) + 0.50572 * (6.07995 + ele) ** -1.6364)
+    intensity *= (
+        (1 - ALTITUDE / 7.1) * (0.7 ** (airmass ** 0.678)) +
+        (ALTITUDE / 7.1))
 
     incident_angle_fac = incident_angle_fac * corr_reflection
 
     # Correction for cell efficiency due to temperature
     # http://crossmark.crossref.org/dialog/?doi=10.1016/j.egypro.2014.10.282&domain=pdf
-    #
-    # This doesn't really work (see very strange temperatures in Aachen functions)
-    # Maybe the NOCT formula is off for my roof??
     t_a = get_average_temp(day_of_year(dt), dt.hour + dt.minute / 60)
-    t_c = t_a + (NOCT - 20) * (1000 * I) * incident_angle_fac / 800
+    t_c = t_a + (NOCT - 20) * (1000 * intensity) * incident_angle_fac / 800
     temperature_fac = 1 + (1.0 * BETA) * (t_c - 25) / 100
 
     # derating due to overheating of inverter is missing!
     # affects noon in July/August, mostly
     # https://www.photovoltaik4all.de/media/pdf/34/12/c6/SMA-Wirkungungrade-Derat-TI-de-44.pdf
-    fullpower = MAX_POWER * temperature_fac * I
+    fullpower = MAX_POWER * temperature_fac * intensity
 
-    # 10% for diffusion (according to wikipedia..? do not find the link anymore)
+    # 10% for diffusion (according to wikipedia..? do not find the link
+    # anymore)
     diffusion = 0.1  # 10 %
     power = fullpower * (diffusion + (1 - diffusion) * incident_angle_fac)
 
@@ -300,101 +299,8 @@ def compute_power(dt, stray=False):
     return power
 
 
-def read_daily(filename):
-    data = read_csv(filename)
-    times, power = [np.asarray([x[i] for x in data]) for i in [0, 2]]
-    if times[0] == times[12]:
-        times, power = times[12:], power[12:]
-    if times[0] == times[12]:
-        times, power = times[12:], power[12:]
-    opt_power, stray_power = compute_powers(times, stray=True)
-    return times, power, opt_power, stray_power
-
-
-def read_monthly(filename):
-    data = read_csv(filename)
-    times, power = [[x[i] for x in data] for i in [0, 2]]
-    return times, power
-
-
-def ana_daily():
-    fig = plt.figure()
-    grid = AxesGrid(fig, 111,  # similar to subplot(142)
-                    nrows_ncols=(4, 3),
-                    axes_pad=0.1,
-                    aspect=False,
-                    share_all=True,
-                    label_mode="L",
-                    cbar_location="right",
-                    cbar_mode="single",
-                    cbar_size="2%",
-                    cbar_pad="2%")
-    cache_file = "daily.pickle"
-    if os.path.exists(cache_file):
-        with open(cache_file, "rb") as pifi:
-            hours, powers, maxs, mins, straymean, max_time = pickle.load(pifi)
-    else:
-        hours = {}
-        powers = {}
-        maxs = {}
-        mins = {}
-        straymean = {}
-        straymean_cnt = {}
-        max_time = {}
-        for i in range(12):
-            hours[i] = []
-            powers[i] = []
-            maxs[i] = None
-            max_time[i] = np.arange(0, 24, 5 / 60)
-        for fn in sorted(glob.glob("*/MyPlant-20??????.csv")):
-            if fn in ["2019/MyPlant-20190331.csv"]:
-                continue
-            filetimes, filepowers, fileoptpowers, filestraypowers = read_daily(fn)
-            assert fileoptpowers.shape == filestraypowers.shape
-            print(f"{fn} {filepowers.sum():4.0f} {fileoptpowers.sum():4.0f}")
-            month = filetimes[0].month - 1
-            hours[month].extend([second_of_day(_x) for _x in filetimes])
-            powers[month].extend(filepowers)
-            if maxs[month] is None:
-                maxs[month] = fileoptpowers
-                mins[month] = fileoptpowers
-                straymean[month] = filestraypowers
-                straymean_cnt[month] = 1
-                continue
-
-            assert fileoptpowers.shape == maxs[month].shape, \
-                   (fileoptpowers.shape, maxs[month].shape)
-            assert (np.asarray(max_time[month][:len(fileoptpowers)]) -
-                    np.asarray([second_of_day(x) for x in filetimes])).sum() < 1e-4, \
-                   (np.asarray(max_time[month][:len(fileoptpowers)]) - np.asarray([second_of_day(x) for x in filetimes]))
-            maxs[month] = np.where(
-                maxs[month] > fileoptpowers, maxs[month], fileoptpowers)
-            mins[month] = np.where(
-                mins[month] < fileoptpowers, mins[month], fileoptpowers)
-            straymean[month] += filestraypowers
-            straymean_cnt[month] += 1
-
-        for month in straymean:
-            straymean[month] /= straymean_cnt[month]
-
-        with open(cache_file, "wb") as pifi:
-            pickle.dump((hours, powers, maxs, mins, straymean, max_time), pifi)
-
-    for i, month in enumerate(months):
-        if len(powers[i]) > 0:
-            im = grid[i].hexbin(
-                hours[i], powers[i], cmap=plt.cm.gray_r,
-                vmax=8, extent=(0, 24, MAX_POWER, 0), rasterized=True)
-            grid[i].plot(max_time[i][:len(maxs[i])], maxs[i], color="C1", zorder=100)
-            grid[i].plot(max_time[i][:len(mins[i])], mins[i], color="C1", zorder=100)
-            grid[i].plot(max_time[i][:len(straymean[i])], straymean[i], color="C0", zorder=100)
-        grid[i].set_xticks(np.arange(0, 25, 3))
-        grid[i].set_xlim(3, 21)
-        grid[i].set_ylim(0, 4)
-        grid[i].text(0.05, 0.85, month, ha="left", transform=grid[i].transAxes)
-    plt.colorbar(im, grid.cbar_axes[0], extend="max")
-    plt.savefig("daily.png")
-    plt.savefig("daily.pdf")
+def compute_powers(dts, stray=False):
+    return np.asarray([compute_power(dt, stray) for dt in dts]).T
 
 
 def compute_day(time):
@@ -406,178 +312,3 @@ def compute_day(time):
 
 def compute_days(times):
     return [compute_day(time) for time in times]
-
-
-def ana_monthly():
-    cache_file = "monthly.pickle"
-    if os.path.exists(cache_file):
-        with open(cache_file, "rb") as pifi:
-            (times, powers, optpowers, times_mean, powers_mean, times_yearly,
-             times_yearly_mean, powers_yearly, powers_yearly_mean
-             ) = pickle.load(pifi)
-    else:
-        times = []
-        powers = []
-        optpowers = []
-        times_mean = []
-        powers_mean = []
-        times_yearly = {}
-        times_yearly_mean = {}
-        powers_yearly = {}
-        powers_yearly_mean = {}
-        for fn in sorted(glob.glob("*/MyPlant-20????.csv")):
-            time, power = read_monthly(fn)
-            times.extend(time)
-            powers.extend(power)
-            optpowers.extend(compute_days(time))
-            times_mean.append(time[len(time) // 2])
-            powers_mean.append(np.mean(power))
-
-            if time[0].year not in times_yearly:
-                times_yearly[time[0].year] = []
-                times_yearly_mean[time[0].year] = []
-                powers_yearly[time[0].year] = []
-                powers_yearly_mean[time[0].year] = []
-            times_yearly[time[0].year].extend(day_of_year(x) for x in time)
-            powers_yearly[time[0].year].extend(power)
-            times_yearly_mean[time[0].year].append(day_of_year(time[len(time) // 2]))
-            powers_yearly_mean[time[0].year].append(np.mean(power))
-        with open(cache_file, "wb") as pifi:
-            pickle.dump(
-                (times, powers, optpowers, times_mean, powers_mean,
-                 times_yearly, times_yearly_mean, powers_yearly, powers_yearly_mean), pifi)
-
-    fig, (ax1, ax2) = plt.subplots(2, 1)
-    ax1.plot(times, powers, "x", label="daily")
-    ax1.plot(times, optpowers, "k-", label="optimum")
-    ax1.plot(times_mean, powers_mean, lw=4, label="monthly mean")
-    avg_power = {}
-    for x, y in zip(times_mean, powers_mean):
-        avg_power.setdefault(x.month, []).append(y)
-    for i in range(12):
-        avg_power[i + 1] = np.mean(avg_power[i + 1])
-    powers_avg = [avg_power[x.month] for x in times_mean]
-    ax1.plot(times_mean, powers_avg, lw=4, label="multi-year mean")
-    ax1.set_ylabel("kWh")
-    ax1.set_ylim(0, 31)
-    ax1.set_xlim(times[0] - timedelta(days=15), times[-1] + timedelta(days=15))
-    ax1.legend()
-    for idx, year in enumerate(times_yearly):
-        ax2.plot(times_yearly[year], powers_yearly[year], "x",
-                 color="C{}".format(idx), label='_nolegend_')
-
-        ax2.plot(times_yearly_mean[year], powers_yearly_mean[year],
-                 color="C{}".format(idx), label=year, lw=4)
-        continue
-    ax2.set_xlim(0, 365)
-    ax2.set_xticks(np.arange(15, 365, 365 // 12))
-    ax2.set_xticklabels("JFMAMJJASOND")
-    ax2.set_ylabel("kWh")
-    # ax2.legend()
-    fig.savefig("monthly.pdf")
-    fig.savefig("monthly.png")
-
-
-if __name__ == "__main__":
-    # ana_daily()
-    # ana_monthly()
-    # exit()
-    # now = datetime.now().replace(minute=0).replace(second=0).replace(hour=0).replace(microsecond=0)
-    # now = UTC.localize(now)
-    # dts = [now + timedelta(minutes=x) for x in range(0, 60 * 24, 5)]
-    # power = compute_powers(dts, stray=True)
-    # plt.figure()
-    # plt.ylabel("kWh")
-    # plt.xlabel("time")
-    # plt.plot(dts, power[0], label="power")
-    # #plt.plot(dts, power[1], label="power (straylight only)")
-    # plt.legend()
-    fig, axs = plt.subplots(2, 2)
-    axs = axs.reshape(-1)
-    axs[0].set_ylabel("kW")
-    axs[0].set_xlabel("time (hours of day)")
-    # axs[1].set_ylabel("kW")
-    axs[1].set_xlabel("azimuth")
-    # axs[2].set_ylabel("kW")
-    axs[2].set_xlabel("elevation")
-    axs[3].set_ylabel("elevation")
-    axs[3].set_xlabel("azimuth")
-    axs[1].axvline(AZIMUTH, color="k")
-    axs[2].axvline(ELEVATION, color="k")
-    axs[3].axvline(AZIMUTH, color="C2")
-    axs[3].axhline(ELEVATION, color="C2")
-    az_bak = AZIMUTH
-    el_bak = ELEVATION
-
-    # comparison
-    minutes = np.arange(0, 60 * 24, 5.)
-    azs = np.arange(90, 271, 5.)
-    eles = np.arange(0, 90, 5.)
-    for month in range(2, 12, 3):
-        now = datetime(2022, month + 1, 15)
-        now = UTC.localize(now)
-        dts = [now + timedelta(minutes=x) for x in minutes]
-        power = compute_powers(dts, stray=True)
-        axs[0].plot(minutes / 60, power[0], label=months[month])
-
-        powers = []
-        for az in azs:
-            dts = [now + timedelta(minutes=x) for x in minutes]
-            AZIMUTH = az
-            power = compute_powers(dts, stray=False)
-            powers.append(power.sum() / 12)
-            # axs[1].plot(minutes, power, label=str(az))
-            AZIMUTH = az_bak
-        axs[1].plot(azs, powers / max(powers))
-        powers = []
-        for ele in eles:
-            dts = [now + timedelta(minutes=x) for x in minutes]
-            ELEVATION = ele
-            power = compute_powers(dts, stray=False)
-            powers.append(power.sum() / 12)
-            # axs[1].plot(minutes, power, label=str(az))
-            ELEVATION = el_bak
-        axs[2].plot(eles, powers / max(powers))
-    axs[0].legend()
-
-    # overview
-    delta_min = 30.
-    day_skip = 5
-    days = np.arange(0, 365, day_skip)
-    minutes = np.concatenate(
-        [x * 60 * 24 + np.arange(0, 60 * 24, delta_min) for x in days])
-    azs = np.arange(90, 270.5, 15.)
-    eles = np.arange(0, 90.5, 5.)
-
-    now = datetime(2022, 1, 1)
-    now = UTC.localize(now)
-    dts = [now + timedelta(minutes=x) for x in minutes]
-    powers = np.zeros((len(eles), len(azs)))
-    for ie, ele in enumerate(tqdm.tqdm(eles)):
-        for ia, az in enumerate(azs):
-            AZIMUTH = az
-            ELEVATION = ele
-            # print(AZIMUTH, ELEVATION)
-            power = compute_powers(dts, stray=True)
-            powers[ie, ia] = day_skip * (power.sum() / (60 / delta_min)) / 1000
-    AZIMUTH = az_bak
-    ELEVATION = el_bak
-    from scipy.interpolate import RegularGridInterpolator
-    interp = RegularGridInterpolator((eles, azs), powers)
-
-    azs_p = np.arange(90, 270.5, 1.)
-    eles_p = np.arange(0, 90.5, 1.)
-    x, y = np.meshgrid(eles_p, azs_p)
-    powers_p = interp((x, y)).T
-
-    pm = axs[3].pcolormesh(azs_p, eles_p, powers_p, vmin=4.5, vmax=8.5, cmap="magma")
-    co = axs[3].contour(azs_p, eles_p, powers_p, np.arange(5, 9, 0.5), colors="w")
-    plt.clabel(co)
-    axs[3].set_xticks(azs)
-    axs[3].set_yticks(eles)
-    cb = plt.colorbar(pm, ax=axs[3], label="MWh")
-    cb.add_lines(co)
-    plt.tight_layout()
-    plt.savefig("comparison.png")
-    plt.savefig("comparison.pdf")
-    plt.show()
