@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from scipy import interpolate
 from mpl_toolkits.axes_grid1 import AxesGrid
 import numpy as np
+import tqdm
 
 
 # configuration of solar array
@@ -392,6 +393,7 @@ def ana_daily():
         grid[i].set_ylim(0, 4)
         grid[i].text(0.05, 0.85, month, ha="left", transform=grid[i].transAxes)
     plt.colorbar(im, grid.cbar_axes[0], extend="max")
+    plt.savefig("daily.png")
     plt.savefig("daily.pdf")
 
 
@@ -456,10 +458,10 @@ def ana_monthly():
         avg_power[i + 1] = np.mean(avg_power[i + 1])
     powers_avg = [avg_power[x.month] for x in times_mean]
     ax1.plot(times_mean, powers_avg, lw=4, label="multi-year mean")
-    ax1.legend()
     ax1.set_ylabel("kWh")
     ax1.set_ylim(0, 31)
     ax1.set_xlim(times[0] - timedelta(days=15), times[-1] + timedelta(days=15))
+    ax1.legend()
     for idx, year in enumerate(times_yearly):
         ax2.plot(times_yearly[year], powers_yearly[year], "x",
                  color="C{}".format(idx), label='_nolegend_')
@@ -471,13 +473,15 @@ def ana_monthly():
     ax2.set_xticks(np.arange(15, 365, 365 // 12))
     ax2.set_xticklabels("JFMAMJJASOND")
     ax2.set_ylabel("kWh")
-    ax2.legend()
+    # ax2.legend()
     fig.savefig("monthly.pdf")
+    fig.savefig("monthly.png")
 
 
 if __name__ == "__main__":
-    ana_daily()
-    ana_monthly()
+    # ana_daily()
+    # ana_monthly()
+    # exit()
     # now = datetime.now().replace(minute=0).replace(second=0).replace(hour=0).replace(microsecond=0)
     # now = UTC.localize(now)
     # dts = [now + timedelta(minutes=x) for x in range(0, 60 * 24, 5)]
@@ -486,6 +490,94 @@ if __name__ == "__main__":
     # plt.ylabel("kWh")
     # plt.xlabel("time")
     # plt.plot(dts, power[0], label="power")
-    # plt.plot(dts, power[1], label="power (straylight only)")
+    # #plt.plot(dts, power[1], label="power (straylight only)")
     # plt.legend()
-    #plt.show()
+    fig, axs = plt.subplots(2, 2)
+    axs = axs.reshape(-1)
+    axs[0].set_ylabel("kW")
+    axs[0].set_xlabel("time (hours of day)")
+    # axs[1].set_ylabel("kW")
+    axs[1].set_xlabel("azimuth")
+    # axs[2].set_ylabel("kW")
+    axs[2].set_xlabel("elevation")
+    axs[3].set_ylabel("elevation")
+    axs[3].set_xlabel("azimuth")
+    axs[1].axvline(AZIMUTH, color="k")
+    axs[2].axvline(ELEVATION, color="k")
+    axs[3].axvline(AZIMUTH, color="C2")
+    axs[3].axhline(ELEVATION, color="C2")
+    az_bak = AZIMUTH
+    el_bak = ELEVATION
+
+    # comparison
+    minutes = np.arange(0, 60 * 24, 5.)
+    azs = np.arange(90, 271, 5.)
+    eles = np.arange(0, 90, 5.)
+    for month in range(2, 12, 3):
+        now = datetime(2022, month + 1, 15)
+        now = UTC.localize(now)
+        dts = [now + timedelta(minutes=x) for x in minutes]
+        power = compute_powers(dts, stray=True)
+        axs[0].plot(minutes / 60, power[0], label=months[month])
+
+        powers = []
+        for az in azs:
+            dts = [now + timedelta(minutes=x) for x in minutes]
+            AZIMUTH = az
+            power = compute_powers(dts, stray=False)
+            powers.append(power.sum() / 12)
+            # axs[1].plot(minutes, power, label=str(az))
+            AZIMUTH = az_bak
+        axs[1].plot(azs, powers / max(powers))
+        powers = []
+        for ele in eles:
+            dts = [now + timedelta(minutes=x) for x in minutes]
+            ELEVATION = ele
+            power = compute_powers(dts, stray=False)
+            powers.append(power.sum() / 12)
+            # axs[1].plot(minutes, power, label=str(az))
+            ELEVATION = el_bak
+        axs[2].plot(eles, powers / max(powers))
+    axs[0].legend()
+
+    # overview
+    delta_min = 30.
+    day_skip = 5
+    days = np.arange(0, 365, day_skip)
+    minutes = np.concatenate(
+        [x * 60 * 24 + np.arange(0, 60 * 24, delta_min) for x in days])
+    azs = np.arange(90, 270.5, 15.)
+    eles = np.arange(0, 90.5, 5.)
+
+    now = datetime(2022, 1, 1)
+    now = UTC.localize(now)
+    dts = [now + timedelta(minutes=x) for x in minutes]
+    powers = np.zeros((len(eles), len(azs)))
+    for ie, ele in enumerate(tqdm.tqdm(eles)):
+        for ia, az in enumerate(azs):
+            AZIMUTH = az
+            ELEVATION = ele
+            # print(AZIMUTH, ELEVATION)
+            power = compute_powers(dts, stray=True)
+            powers[ie, ia] = day_skip * (power.sum() / (60 / delta_min)) / 1000
+    AZIMUTH = az_bak
+    ELEVATION = el_bak
+    from scipy.interpolate import RegularGridInterpolator
+    interp = RegularGridInterpolator((eles, azs), powers)
+
+    azs_p = np.arange(90, 270.5, 1.)
+    eles_p = np.arange(0, 90.5, 1.)
+    x, y = np.meshgrid(eles_p, azs_p)
+    powers_p = interp((x, y)).T
+
+    pm = axs[3].pcolormesh(azs_p, eles_p, powers_p, vmin=4.5, vmax=8.5, cmap="magma")
+    co = axs[3].contour(azs_p, eles_p, powers_p, np.arange(5, 9, 0.5), colors="w")
+    plt.clabel(co)
+    axs[3].set_xticks(azs)
+    axs[3].set_yticks(eles)
+    cb = plt.colorbar(pm, ax=axs[3], label="MWh")
+    cb.add_lines(co)
+    plt.tight_layout()
+    plt.savefig("comparison.png")
+    plt.savefig("comparison.pdf")
+    plt.show()
