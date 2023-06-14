@@ -49,7 +49,7 @@ if __name__ == "__main__":
             powers[i] = []
             maxs[i] = None
             max_time[i] = np.arange(0, 24, 5 / 60)
-        for fn in sorted(glob.glob("*/MyPlant-20??????.csv")):
+        for fn in sorted(glob.glob("*/MyPlant-202[23]????.csv")):
             if fn in ["2019/MyPlant-20190331.csv"]:
                 continue
             filetimes, filepowers, fileoptpowers, filestraypowers = read_daily(fn)

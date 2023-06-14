@@ -288,8 +288,8 @@ def compute_power(dt, stray=False):
     # https://www.photovoltaik4all.de/media/pdf/34/12/c6/SMA-Wirkungungrade-Derat-TI-de-44.pdf
     fullpower = MAX_POWER * temperature_fac * intensity
 
-    # 10% for diffusion (according to wikipedia..? do not find the link
-    # anymore)
+    # *additional* 10% for diffusion (according to wikipedia)
+    # https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
     diffusion = 0.1  # 10 %
     power = fullpower * (diffusion + (1 - diffusion) * incident_angle_fac)
 
