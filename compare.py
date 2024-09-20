@@ -40,20 +40,20 @@ if __name__ == "__main__":
         powers = []
         for az in azs:
             dts = [now + timedelta(minutes=x) for x in minutes]
-            AZIMUTH = az
+            solar.AZIMUTH = az
             power = solar.compute_powers(dts, stray=False)
             powers.append(power.sum() / 12)
             # axs[1].plot(minutes, power, label=str(az))
-            AZIMUTH = az_bak
+            solar.AZIMUTH = az_bak
         axs[1].plot(azs, powers / max(powers))
         powers = []
         for ele in eles:
             dts = [now + timedelta(minutes=x) for x in minutes]
-            ELEVATION = ele
+            solar.ELEVATION = ele
             power = solar.compute_powers(dts, stray=False)
             powers.append(power.sum() / 12)
             # axs[1].plot(minutes, power, label=str(az))
-            ELEVATION = el_bak
+            solar.ELEVATION = el_bak
         axs[2].plot(eles, powers / max(powers))
     axs[0].legend()
 
@@ -72,13 +72,13 @@ if __name__ == "__main__":
     powers = np.zeros((len(eles), len(azs)))
     for ie, ele in enumerate(tqdm.tqdm(eles)):
         for ia, az in enumerate(azs):
-            AZIMUTH = az
-            ELEVATION = ele
+            solar.AZIMUTH = az
+            solar.ELEVATION = ele
             # print(AZIMUTH, ELEVATION)
             power = solar.compute_powers(dts, stray=True)
             powers[ie, ia] = day_skip * (power.sum() / (60 / delta_min)) / 1000
-    AZIMUTH = az_bak
-    ELEVATION = el_bak
+    solar.AZIMUTH = az_bak
+    solar.ELEVATION = el_bak
     from scipy.interpolate import RegularGridInterpolator
     interp = RegularGridInterpolator((eles, azs), powers)
 
