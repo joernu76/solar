@@ -18,20 +18,26 @@ def read_daily(filename):
     if times[0] == times[12]:
         times, power = times[12:], power[12:]
     opt_power, stray_power = solar.compute_powers(times, stray=True)
-    return times, power, opt_power, stray_power
+    opt_power2, stray_power2 = compute_powers(times, stray=True)
+    return times, power, opt_power, stray_power, opt_power2, stray_power2
 
+
+def compute_powers(dts, stray=False):
+    return np.asarray([solar.compute_power_pvlib(dt, stray) for dt in dts]).T
+    # return np.asarray([solar.compute_power(dt, stray) for dt in dts]).T
 
 if __name__ == "__main__":
     data = {}
-    for fn in sorted(glob.glob("*/MyPlant-202[23]????.csv")):
+    for fn in ['2022/MyPlant-20220227.csv', '2022/MyPlant-20220319.csv', '2022/MyPlant-20220525.csv', '2022/MyPlant-20220602.csv', '2022/MyPlant-20220702.csv', '2022/MyPlant-20220807.csv', '2022/MyPlant-20221006.csv', '2022/MyPlant-20221101.csv', '2022/MyPlant-20221212.csv', '2023/MyPlant-20230906.csv', '2024/MyPlant-20240128.csv', '2026/MyPlant-20260430.csv']:
         if fn in ["2019/MyPlant-20190331.csv"]:
             continue
-        filetimes, filepowers, fileoptpowers, filestraypowers = read_daily(fn)
+        filetimes, filepowers, fileoptpowers, filestraypowers, fileoptpowers2, filestraypowers2 = read_daily(fn)
         month = filetimes[0].month
         total = sum(filepowers)
         if month not in data or data[month][0] < total:
-            data[month] = (total, filetimes, filepowers, fileoptpowers)
+            data[month] = (total, filetimes, filepowers, fileoptpowers, fileoptpowers2, fn)
 
+    print(sorted([data[x][-1] for x in data]))
     # _, times, powers, opts = data[5]
     # print(times[0])
     # times = [(_t.replace(tzinfo=None) - datetime.datetime.combine(_t.replace(tzinfo=None), datetime.datetime.min.time())).total_seconds() for _t in times]
@@ -46,10 +52,11 @@ if __name__ == "__main__":
                     aspect=False,
                     share_all=True,
                     label_mode="L")
-    for month, (_, times, powers, opts) in data.items():
+    for month, (_, times, powers, opts, opts2, _) in data.items():
         print(times[0])
         times = [(_t.replace(tzinfo=None) - datetime.datetime.combine(_t.replace(tzinfo=None), datetime.datetime.min.time())).total_seconds() for _t in times]
         grid[month - 1].plot(times, powers, label=month, color=f"C0")
         grid[month - 1].plot(times, opts, label=month, color=f"C1")
+        grid[month - 1].plot(times, opts2, label=month, color=f"C2")
     plt.legend()
     plt.show()

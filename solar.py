@@ -1,15 +1,7 @@
-import os
-import pickle
-import glob
 import pytz
 import codecs
 from datetime import datetime, timedelta
-
-import matplotlib.pyplot as plt
-from scipy import interpolate
-from mpl_toolkits.axes_grid1 import AxesGrid
 import numpy as np
-import tqdm
 
 
 # configuration of solar array
@@ -23,6 +15,17 @@ ALTITUDE = 0.26
 # inverter: SMA Sunny Boy 4000TL-21, nameplate AC hard cap
 INVERTER_AC_MAX = 4.0  # kW
 
+# combined system efficiency derate applied before the AC cap:
+# inverter DC→AC (~97 %), DC wiring/mismatch (~2 %); set to 1.0 to disable
+SYSTEM_EFFICIENCY = 0.97 * 0.98
+
+# scale applied to the climatological monthly-average Linke turbidity in
+# compute_power_pvlib.  Monthly means overstate haze on the clearest days:
+# best January days have TL ≈ 2.0-2.2 while the climatological Jan mean is
+# 3.35, so the scale factor should be around 0.6-0.75 for winter.  Increase
+# toward 1.0 if summer comparisons show systematic overestimation.
+LINKE_TURBIDITY_SCALE = 0.75
+
 # loss of efficiency due to temperature
 BETA = -0.41  # %/C
 # NOCT assumes 800 W/m^2, 20 C, 1 m/s wind; roof-mounted modules with limited
@@ -35,8 +38,8 @@ CET = pytz.timezone("Europe/Berlin")
 JSEC_START = UTC.localize(datetime(2000, 1, 1))
 
 YEARLY_TEMP_MEAN = 10.
-YEARLY_TEMP_VAR = 10.
-DAILY_TEMP_VAR = 5.
+YEARLY_TEMP_VAR = 20.
+DAILY_TEMP_VAR = 5
 
 months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -83,7 +86,7 @@ def compute_solar_angle(jsec, lon, lat):
     mnlong = mnlong % 360.
     if (mnlong < 0):
         mnlong += 360
-        assert(mnlong >= 0)
+        assert mnlong >= 0
 
     # Mean anomaly
     mnanom = 357.528 + .9856003 * time
@@ -97,7 +100,7 @@ def compute_solar_angle(jsec, lon, lat):
     eclong = np.deg2rad(eclong % 360.)
     if (eclong < 0):
         eclong += 2 * np.pi
-        assert(eclong >= 0)
+        assert eclong >= 0
 
     oblqec = np.deg2rad(23.439 - 0.0000004 * time)
 
@@ -137,7 +140,7 @@ def compute_solar_angle(jsec, lon, lat):
     if (ha > np.pi):
         ha -= 2 * np.pi
 
-    assert(-np.pi < ha < 2 * np.pi)
+    assert -np.pi < ha < 2 * np.pi
 
     # Latitude to radians
     lat = np.deg2rad(lat)
@@ -303,12 +306,82 @@ def compute_power(dt, stray=False):
     t_c = t_a + (NOCT - 20) * 1000 * poa / 800
     temperature_fac = 1 + BETA * (t_c - 25) / 100
 
-    # inverter nameplate hard cap (doesn't fire under normal conditions)
-    power = min(MAX_POWER * temperature_fac * poa, INVERTER_AC_MAX)
+    # system efficiency derate then inverter nameplate AC cap
+    power = min(MAX_POWER * temperature_fac * poa * SYSTEM_EFFICIENCY, INVERTER_AC_MAX)
 
     if stray:
-        straypower = min(MAX_POWER * temperature_fac * stray_poa, INVERTER_AC_MAX)
+        straypower = min(MAX_POWER * temperature_fac * stray_poa * SYSTEM_EFFICIENCY, INVERTER_AC_MAX)
         return power, straypower
+    return power
+
+
+def compute_power_pvlib(dt, stray=False):
+    """
+    Computes power output using pvlib.  Uses the Ineichen clear-sky model
+    (location/time-specific Linke turbidity) instead of the simple
+    Meinel/Liu-Jordan parameterisation; everything else follows the same
+    algorithm as compute_power().
+    """
+    import pvlib
+    import pandas as pd
+
+    tilt = 90 - ELEVATION  # tilt from horizontal [deg]
+    times = pd.DatetimeIndex([dt])
+
+    # Solar position; apparent_zenith (refraction-corrected) is appropriate
+    # for irradiance calculations and for the Ineichen model.
+    solar_pos = pvlib.solarposition.get_solarposition(times, LATITUDE, LONGITUDE)
+    apparent_zenith = float(solar_pos['apparent_zenith'].iloc[0])
+    azimuth = float(solar_pos['azimuth'].iloc[0])
+
+    if apparent_zenith >= 90:
+        return (0, 0) if stray else 0
+
+    # Fresnel IAM – physical model with n=1.526, K=0 (no absorption loss)
+    aoi_deg = float(pvlib.irradiance.aoi(tilt, AZIMUTH, apparent_zenith, azimuth))
+    iam = float(pvlib.iam.physical(aoi_deg, n=1.526, K=0))
+
+    # Ineichen clear-sky model: uses pressure-corrected airmass and a
+    # monthly Linke turbidity factor looked up for this location/date.
+    rel_am = pvlib.atmosphere.get_relative_airmass(
+        apparent_zenith, model='kastenyoung1989')
+    abs_am = pvlib.atmosphere.get_absolute_airmass(
+        rel_am, pvlib.atmosphere.alt2pres(ALTITUDE * 1000))  # ALTITUDE km → m
+    tl = float(pvlib.clearsky.lookup_linke_turbidity(times, LATITUDE, LONGITUDE).iloc[0]) * LINKE_TURBIDITY_SCALE
+    dni_extra = float(pvlib.irradiance.get_extra_radiation(day_of_year(dt)))
+    cs = pvlib.clearsky.ineichen(apparent_zenith, abs_am, tl,
+                                  altitude=ALTITUDE * 1000, dni_extra=dni_extra)
+    dni_W, dhi_W, ghi_W = cs['dni'], cs['dhi'], cs['ghi']
+
+    # Plane-of-array irradiance: isotropic sky diffuse + ground reflection
+    poa_comp = pvlib.irradiance.get_total_irradiance(
+        surface_tilt=tilt, surface_azimuth=AZIMUTH,
+        solar_zenith=apparent_zenith, solar_azimuth=azimuth,
+        dni=dni_W, ghi=ghi_W, dhi=dhi_W,
+        albedo=0.2, model='isotropic')
+
+    # Apply IAM only to the beam component (poa_direct already clips to 0
+    # when the sun is behind the panel)
+    beam_W = float(poa_comp['poa_direct']) * iam
+    diffuse_W = float(poa_comp['poa_sky_diffuse'])
+    ground_W = float(poa_comp['poa_ground_diffuse'])
+    poa_total_W = beam_W + diffuse_W + ground_W
+    stray_poa_W = diffuse_W + ground_W
+
+    # Cell temperature – simple NOCT model (no direct pvlib equivalent)
+    t_a = get_average_temp(day_of_year(dt), dt.hour + dt.minute / 60)
+    t_c = t_a + (NOCT - 20) * poa_total_W / 800
+
+    # PVwatts DC power with system efficiency derate then inverter AC cap
+    def _pvwatts_kw(g_W):
+        return min(
+            float(pvlib.pvsystem.pvwatts_dc(
+                g_W, t_c, MAX_POWER * 1000, BETA / 100)) / 1000 * SYSTEM_EFFICIENCY,
+            INVERTER_AC_MAX)
+
+    power = _pvwatts_kw(poa_total_W)
+    if stray:
+        return power, _pvwatts_kw(stray_poa_W)
     return power
 
 
