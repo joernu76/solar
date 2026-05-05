@@ -20,9 +20,15 @@ LONGITUDE = 6.154
 LATITUDE = 50.747
 ALTITUDE = 0.26
 
+# inverter: SMA Sunny Boy 4000TL-21, nameplate AC hard cap
+INVERTER_AC_MAX = 4.0  # kW
+
 # loss of efficiency due to temperature
 BETA = -0.41  # %/C
-NOCT = 45  # +-2 C
+# NOCT assumes 800 W/m^2, 20 C, 1 m/s wind; roof-mounted modules with limited
+# back ventilation run hotter than the datasheet value of ~45 C
+# upped to 60!C to fit data
+NOCT = 45  # C
 
 UTC = pytz.utc
 CET = pytz.timezone("Europe/Berlin")
@@ -244,57 +250,64 @@ def compute_power(dt, stray=False):
     if azi < 0:
         azi += 360
 
+    # cosine of angle of incidence between sun and panel normal
     # https://en.wikipedia.org/wiki/Great-circle_distance
-    # i.e. this is the cosine of angle between normal vector and sun
-    # print(dt, azi, ele, AZIMUTH, ELEVATION)
-    incident_angle_fac = (
+    cos_aoi = (
         cosd(ele) * cosd(ELEVATION) * cosd(AZIMUTH - azi) +
         sind(ele) * sind(ELEVATION))
+    cos_aoi_pos = max(0.0, cos_aoi)  # sun behind panel contributes no direct beam
 
-    # reflection correction, causes loss of a couple of percent at dusk
+    # beam reflection correction (Fresnel, only meaningful for cos_aoi > 0)
     # https://www.osti.gov/servlets/purl/1350025
-    # I.e. actually fully negligible
-    AOI = np.arccos(incident_angle_fac)
     n_glass = 1.526
-    r_0 = 0.0434  # air/glass
-    AOI_r = np.arcsin(np.sin(AOI) / n_glass)
-    r_AOI = 0.5 * ((np.sin(AOI_r - AOI) ** 2 / np.sin(AOI_r + AOI) ** 2)
-                   + (np.tan(AOI_r - AOI) ** 2 / np.tan(AOI_r + AOI) ** 2))
-    corr_reflection = max(0, (1 - r_AOI) / (1 - r_0))
+    r_0 = 0.0434  # air/glass at normal incidence
+    if cos_aoi_pos > 0:
+        AOI = np.arccos(cos_aoi_pos)
+        AOI_r = np.arcsin(np.sin(AOI) / n_glass)
+        r_AOI = 0.5 * ((np.sin(AOI_r - AOI) ** 2 / np.sin(AOI_r + AOI) ** 2)
+                       + (np.tan(AOI_r - AOI) ** 2 / np.tan(AOI_r + AOI) ** 2))
+        corr_reflection = max(0.0, (1 - r_AOI) / (1 - r_0))
+    else:
+        corr_reflection = 0.0
 
-    # solar radiation at top of atmosphere
-    # https://en.wikipedia.org/wiki/Solar_irradiance
-    intensity = 1.360  # kW/m^2
-
-    # correction for distance of sun from earth
-    intensity *= 1 + 0.033 * np.cos(2 * np.pi * (day_of_year(dt) / 365))
-
-    # attenuation -> https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
+    # atmospheric transmittance (Meinel beam + Liu-Jordan diffuse)
+    # https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
     airmass = 1. / (sind(ele) + 0.50572 * (6.07995 + ele) ** -1.6364)
-    intensity *= (
-        (1 - ALTITUDE / 7.1) * (0.7 ** (airmass ** 0.678)) +
-        (ALTITUDE / 7.1))
+    tau_b = ((1 - ALTITUDE / 7.1) * (0.7 ** (airmass ** 0.678))
+             + (ALTITUDE / 7.1))
+    tau_d = max(0.0, 0.271 - 0.294 * tau_b)
 
-    incident_angle_fac = incident_angle_fac * corr_reflection
+    # top-of-atmosphere irradiance with eccentricity correction [kW/m^2]
+    I0 = 1.360 * (1 + 0.033 * np.cos(2 * np.pi * day_of_year(dt) / 365))
 
-    # Correction for cell efficiency due to temperature
+    # component irradiances [kW/m^2]
+    dni = I0 * tau_b                 # direct, normal to sun
+    dhi = I0 * sind(ele) * tau_d     # diffuse, on horizontal
+    ghi = dni * sind(ele) + dhi      # global, on horizontal
+
+    # plane-of-array irradiance (isotropic sky + ground reflection)
+    tilt = 90 - ELEVATION
+    vf_sky = (1 + cosd(tilt)) / 2
+    vf_ground = (1 - cosd(tilt)) / 2
+    albedo = 0.2  # grass/urban mix
+
+    beam_poa = dni * cos_aoi_pos * corr_reflection
+    diffuse_poa = dhi * vf_sky
+    ground_poa = ghi * albedo * vf_ground
+    poa = beam_poa + diffuse_poa + ground_poa
+    stray_poa = diffuse_poa + ground_poa
+
+    # cell temperature from plane-of-array irradiance
     # http://crossmark.crossref.org/dialog/?doi=10.1016/j.egypro.2014.10.282&domain=pdf
     t_a = get_average_temp(day_of_year(dt), dt.hour + dt.minute / 60)
-    t_c = t_a + (NOCT - 20) * (1000 * intensity) * incident_angle_fac / 800
-    temperature_fac = 1 + (1.0 * BETA) * (t_c - 25) / 100
+    t_c = t_a + (NOCT - 20) * 1000 * poa / 800
+    temperature_fac = 1 + BETA * (t_c - 25) / 100
 
-    # derating due to overheating of inverter is missing!
-    # affects noon in July/August, mostly
-    # https://www.photovoltaik4all.de/media/pdf/34/12/c6/SMA-Wirkungungrade-Derat-TI-de-44.pdf
-    fullpower = MAX_POWER * temperature_fac * intensity
-
-    # *additional* 10% for diffusion (according to wikipedia)
-    # https://en.wikipedia.org/wiki/Air_mass_(solar_energy)
-    diffusion = 0.1  # 10 %
-    power = fullpower * (diffusion + (1 - diffusion) * incident_angle_fac)
+    # inverter nameplate hard cap (doesn't fire under normal conditions)
+    power = min(MAX_POWER * temperature_fac * poa, INVERTER_AC_MAX)
 
     if stray:
-        straypower = fullpower * diffusion
+        straypower = min(MAX_POWER * temperature_fac * stray_poa, INVERTER_AC_MAX)
         return power, straypower
     return power
 
